@@ -535,56 +535,175 @@ mod cjk_fallback_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    fn queries_for(dict_bytes: &[u8]) -> Vec<String> {
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedQuery {
+        Standard(&'static str),
+        Fallback {
+            name: Option<String>,
+            collection: Option<CharacterCollection>,
+        },
+    }
+
+    fn queries_for(dict_bytes: &[u8]) -> Vec<RecordedQuery> {
+        queries_with_cmap(dict_bytes, Arc::new(|_| None))
+    }
+
+    fn queries_with_cmap(dict_bytes: &[u8], cmap_resolver: CMapResolverFn) -> Vec<RecordedQuery> {
         let dict = Dict::from_bytes(dict_bytes).unwrap();
-        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_resolver = seen.clone();
         let font_resolver: crate::FontResolverFn = Arc::new(move |query| {
-            let label = match query {
-                FontQuery::Standard(s) => format!("Standard({s:?})"),
-                FontQuery::Fallback(f) => format!(
-                    "Fallback(name={:?}, collection={:?})",
-                    f.post_script_name,
-                    f.character_collection.as_ref().map(|cc| &cc.family)
-                ),
+            let recorded = match query {
+                FontQuery::Standard(s) => RecordedQuery::Standard(s.postscript_name()),
+                FontQuery::Fallback(f) => RecordedQuery::Fallback {
+                    name: f.post_script_name.clone(),
+                    collection: f.character_collection.clone(),
+                },
             };
-            seen_resolver.lock().unwrap().push(label);
-            // Only query selection is under test, so no embedded font data is needed.
+            seen_resolver.lock().unwrap().push(recorded);
+            // Only query selection is under test. No font data is needed, including
+            // when the embed-fonts feature is disabled.
             None
         });
-        let cmap_resolver: CMapResolverFn = Arc::new(|_| None);
 
         let cache = crate::FontCache::new();
         let _ = cache.font(&dict, &font_resolver, &cmap_resolver);
         std::mem::take(&mut *seen.lock().unwrap())
     }
 
-    #[test]
-    fn non_embedded_cjk_font_named_sans_falls_back_to_the_collection() {
-        let queries = queries_for(
-            b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSansKR-Regular /Encoding /Identity-H \
-              /DescendantFonts [ << /Type /Font /Subtype /CIDFontType0 /DW 1000 \
-              /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 0 >> >> ] >>",
-        );
-        assert!(
-            queries.iter().all(|q| !q.starts_with("Standard")),
-            "a CJK-collection font must not resolve to a standard font: {queries:?}"
-        );
-        assert!(
-            queries.iter().any(|q| q.contains("AdobeKorea1")),
-            "the fallback query carries the character collection: {queries:?}"
-        );
+    fn type0_dict(name: &str, cid_system_info: &str) -> String {
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H \
+             /DescendantFonts [ << /Type /Font /Subtype /CIDFontType0 /DW 1000 \
+             {cid_system_info} >> ] >>"
+        )
+    }
+
+    fn cjk_collections() -> [(&'static str, CidFamily); 4] {
+        [
+            ("Japan1", CidFamily::AdobeJapan1),
+            ("GB1", CidFamily::AdobeGB1),
+            ("CNS1", CidFamily::AdobeCNS1),
+            ("Korea1", CidFamily::AdobeKorea1),
+        ]
     }
 
     #[test]
-    fn non_embedded_non_cjk_font_named_sans_still_matches_a_standard_font() {
-        let queries = queries_for(
-            b"<< /Type /Font /Subtype /Type0 /BaseFont /NotoSans-Regular /Encoding /Identity-H \
-              /DescendantFonts [ << /Type /Font /Subtype /CIDFontType0 /DW 1000 >> ] >>",
-        );
-        assert!(
-            queries.iter().any(|q| q.starts_with("Standard")),
-            "a non-CJK font still keyword-matches a standard font: {queries:?}"
-        );
+    fn non_embedded_cjk_keyword_matches_preserve_name_and_collection() {
+        for (ordering, family) in cjk_collections() {
+            for name in [
+                "NotoSansKR-Regular",
+                "NotoSerifCJK-Regular",
+                "ArialUnicodeMS",
+                "CJKMono-Regular",
+                "HYGothic-Medium",
+            ] {
+                let dict = type0_dict(
+                    name,
+                    &format!(
+                        "/CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement 2 >>"
+                    ),
+                );
+                assert_eq!(
+                    queries_for(dict.as_bytes()),
+                    [RecordedQuery::Fallback {
+                        name: Some(name.into()),
+                        collection: Some(CharacterCollection {
+                            family: family.clone(),
+                            supplement: 2,
+                        }),
+                    }],
+                    "{name} with Adobe-{ordering}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_embedded_cjk_standard_family_matches_are_preserved() {
+        // select_standard_font's `exact` flag also covers family aliases, not
+        // just literal base-14 names. TimesNewRomanPSMT is used by pdfjs_issue11088.
+        for (ordering, _) in cjk_collections() {
+            for (name, standard) in [
+                ("TimesNewRomanPSMT", "Times-Roman"),
+                ("ABCDEF+TimesNewRomanPSMT", "Times-Roman"),
+                ("Times-Roman", "Times-Roman"),
+                ("Helvetica", "Helvetica"),
+                ("HelveticaNeue", "Helvetica"),
+                ("CourierNewPSMT", "Courier"),
+                ("Symbol", "Symbol"),
+                ("ZapfDingbats", "ZapfDingbats"),
+            ] {
+                let dict = type0_dict(
+                    name,
+                    &format!(
+                        "/CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement 0 >>"
+                    ),
+                );
+                assert_eq!(
+                    queries_for(dict.as_bytes()),
+                    [RecordedQuery::Standard(standard)],
+                    "{name} with Adobe-{ordering}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_embedded_non_cjk_keyword_matches_are_preserved() {
+        for cid_system_info in [
+            "",
+            "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>",
+            "/CIDSystemInfo << /Registry (Custom) /Ordering (Korea1) /Supplement 0 >>",
+        ] {
+            for (name, standard) in [
+                ("NotoSans-Regular", "Helvetica"),
+                ("NotoSerif-Regular", "Times-Roman"),
+                ("Arial", "Helvetica"),
+                ("ExampleMono-Regular", "Courier"),
+            ] {
+                let dict = type0_dict(name, cid_system_info);
+                assert_eq!(
+                    queries_for(dict.as_bytes()),
+                    [RecordedQuery::Standard(standard)],
+                    "{name} with {cid_system_info:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_embedded_cjk_collection_from_encoding_controls_query_selection() {
+        // Exercise the CMap metadata path used by pdfjs_issue11088 without
+        // requiring embedded CMaps or external test assets.
+        let cmap_resolver: CMapResolverFn = Arc::new(|name| {
+            matches!(name, hayro_cmap::CMapName::GbkEucH).then_some(
+                b"/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> def \
+                  /CMapName /GBK-EUC-H def /CMapType 1 def /WMode 0 def \
+                  1 begincodespacerange <0000> <FFFF> endcodespacerange \
+                  1 begincidrange <0000> <FFFF> 0 endcidrange"
+                    .as_slice(),
+            )
+        });
+        for (name, expected) in [
+            ("TimesNewRomanPSMT", RecordedQuery::Standard("Times-Roman")),
+            (
+                "NotoSansCJK-Regular",
+                RecordedQuery::Fallback {
+                    name: Some("NotoSansCJK-Regular".into()),
+                    collection: Some(CharacterCollection {
+                        family: CidFamily::AdobeGB1,
+                        supplement: 2,
+                    }),
+                },
+            ),
+        ] {
+            let dict = type0_dict(name, "").replace("/Identity-H", "/GBK-EUC-H");
+            assert_eq!(
+                queries_with_cmap(dict.as_bytes(), cmap_resolver.clone()),
+                [expected],
+                "{name} with GBK-EUC-H"
+            );
+        }
     }
 }
