@@ -531,7 +531,6 @@ fn read_encoding(object: &Object<'_>, cmap_resolver: &CMapResolverFn) -> Option<
 #[cfg(test)]
 mod cjk_fallback_tests {
     use super::*;
-    use crate::standard_font::StandardFont;
     use hayro_syntax::object::FromBytes;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -550,7 +549,8 @@ mod cjk_fallback_tests {
                 ),
             };
             seen_resolver.lock().unwrap().push(label);
-            Some(StandardFont::Helvetica.get_font_data())
+            // Only query selection is under test, so no embedded font data is needed.
+            None
         });
         let cmap_resolver: CMapResolverFn = Arc::new(|_| None);
 
