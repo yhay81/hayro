@@ -105,6 +105,7 @@ impl<'a> SvgRenderer<'a> {
                                 soft_mask: None,
                                 blend_mode: BlendMode::Normal,
                                 overprint: Overprint::default(),
+                                rendering_intent: hayro_interpret::RenderingIntent::default(),
                             },
                             &DrawMode::Fill(FillRule::NonZero),
                         );

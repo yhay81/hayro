@@ -476,8 +476,9 @@ pub fn interpret<'a>(
                         .map(|n| if n == 0.0 { 0.01 } else { n })
                         .collect();
             }
-            TypedInstruction::RenderingIntent(_) => {
-                // Ignore for now.
+            TypedInstruction::RenderingIntent(intent) => {
+                context.compositing_mut().rendering_intent =
+                    crate::RenderingIntent::from_name(intent.0);
             }
             TypedInstruction::NonStrokeColorNamed(n) => {
                 context.fill_paint_mut().color = n.0.into_iter().map(|n| n.as_f32()).collect();

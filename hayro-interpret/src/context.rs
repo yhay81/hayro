@@ -214,6 +214,7 @@ impl<'a> Context<'a> {
             soft_mask: self.compositing().soft_mask.clone(),
             blend_mode: self.compositing().blend_mode,
             overprint: self.compositing().overprint,
+            rendering_intent: self.compositing().rendering_intent,
         }
     }
 

@@ -4,7 +4,8 @@ use crate::pattern::Pattern;
 use crate::util::hash128;
 use crate::x_object::ImageXObject;
 use crate::x_object::soft_mask::SoftMask;
-use hayro_syntax::object::Stream;
+use hayro_syntax::object::dict::keys::{ABSOLUTE_COLORIMETRIC, PERCEPTUAL, SATURATION};
+use hayro_syntax::object::{Name, Stream};
 use kurbo::{Affine, BezPath, Cap, Join};
 use smallvec::{SmallVec, smallvec};
 
@@ -287,6 +288,8 @@ pub struct DrawProps<'a> {
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
     pub blend_mode: BlendMode,
+    /// The effective color rendering intent.
+    pub rendering_intent: RenderingIntent,
     /// The overprint parameters.
     pub overprint: Overprint,
 }
@@ -300,10 +303,38 @@ pub struct ImageDrawProps<'a> {
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
     pub blend_mode: BlendMode,
+    /// The effective color rendering intent.
+    pub rendering_intent: RenderingIntent,
     /// The overprint parameters.
     ///
     /// An image is painted with [`Overprint::fill`].
     pub overprint: Overprint,
+}
+
+/// The standard PDF color rendering intents.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderingIntent {
+    /// Preserve colors relative to the media white point.
+    #[default]
+    RelativeColorimetric,
+    /// Preserve colors relative to the source illuminant.
+    AbsoluteColorimetric,
+    /// Preserve relationships between colors.
+    Perceptual,
+    /// Preserve saturation.
+    Saturation,
+}
+
+impl RenderingIntent {
+    pub(crate) fn from_name(name: &Name<'_>) -> Self {
+        match name.as_ref() {
+            ABSOLUTE_COLORIMETRIC => Self::AbsoluteColorimetric,
+            PERCEPTUAL => Self::Perceptual,
+            SATURATION => Self::Saturation,
+            _ => Self::RelativeColorimetric,
+        }
+    }
 }
 
 /// The overprint parameters of the graphics state, as set by the `OP`, `op`

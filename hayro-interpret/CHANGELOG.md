@@ -14,6 +14,8 @@
 - Breaking change: `DrawProps` and `ImageDrawProps` have a new field, `overprint`, with the
   overprint parameters of the graphics state (`OP`, `op` and `OPM`).
 
+- Breaking change: `DrawProps` and `ImageDrawProps` expose the effective `rendering_intent` for color-managed devices.
+
 ## [0.9.0] - 2026-11-02
 
 This release has an [MSRV] of 1.92.

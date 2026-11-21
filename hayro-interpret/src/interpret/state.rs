@@ -6,7 +6,7 @@ use crate::font::{Font, UNITS_PER_EM};
 use crate::function::{Function, TransferFunction};
 use crate::interpret::text::TextRenderingMode;
 use crate::pattern::Pattern;
-use crate::types::{BlendMode, Overprint};
+use crate::types::{BlendMode, Overprint, RenderingIntent};
 use crate::x_object::soft_mask::SoftMask;
 use hayro_syntax::content::ops::{LineCap, LineJoin};
 use hayro_syntax::object::dict::keys::{FONT, OP_NS, SMASK, TR, TR2};
@@ -264,6 +264,7 @@ pub(crate) struct CompositingState<'a> {
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
     pub(crate) blend_mode: BlendMode,
     pub(crate) overprint: Overprint,
+    pub(crate) rendering_intent: RenderingIntent,
 }
 
 pub(crate) struct PaintData<'a> {
@@ -300,6 +301,10 @@ pub(crate) fn handle_gs_single<'a>(
         "LJ" => {
             context.stroke_props_mut().line_join =
                 convert_line_join(LineJoin(dict.get::<Number>(key)?));
+        }
+        "RI" => {
+            context.compositing_mut().rendering_intent =
+                RenderingIntent::from_name(&dict.get::<Name<'_>>(key)?);
         }
         "ML" => context.stroke_props_mut().miter_limit = dict.get::<f32>(key)?,
         "OP" => {
@@ -432,22 +437,26 @@ mod tests {
     use crate::font::GlyphRun;
     use crate::{
         BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps,
-        InterpreterCache, InterpreterSettings, Overprint, SoftMask, interpret_page,
+        InterpreterCache, InterpreterSettings, Overprint, RenderingIntent, SoftMask,
+        interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::{Affine, BezPath, Rect};
 
-    /// Records the overprint parameters of each drawing operation.
     #[derive(Default)]
-    struct OverprintDevice(Vec<(&'static str, Overprint)>);
+    struct RecordingDevice {
+        overprints: Vec<(&'static str, Overprint)>,
+        intents: Vec<RenderingIntent>,
+    }
 
-    impl Device<'_> for OverprintDevice {
+    impl Device<'_> for RecordingDevice {
         fn draw_path(&mut self, _: &BezPath, props: DrawProps<'_>, draw_mode: &DrawMode) {
             let kind = match draw_mode {
                 DrawMode::Stroke(_) => "stroke",
                 _ => "fill",
             };
-            self.0.push((kind, props.overprint));
+            self.overprints.push((kind, props.overprint));
+            self.intents.push(props.rendering_intent);
         }
 
         fn push_clip_path(&mut self, _: &ClipPath) {}
@@ -457,7 +466,8 @@ mod tests {
         fn draw_glyph_run(&mut self, _: &GlyphRun<'_, '_>, _: DrawProps<'_>, _: &DrawMode) {}
 
         fn draw_image(&mut self, _: Image<'_, '_>, props: ImageDrawProps<'_>) {
-            self.0.push(("image", props.overprint));
+            self.overprints.push(("image", props.overprint));
+            self.intents.push(props.rendering_intent);
         }
 
         fn pop_clip(&mut self) {}
@@ -465,15 +475,13 @@ mod tests {
         fn pop_transparency_group(&mut self) {}
     }
 
-    /// The overprint parameters of each drawing operation of a page whose
-    /// content is `content`, with the graphics states `/A` to `/E`.
-    fn overprints(content: &str) -> Vec<(&'static str, Overprint)> {
+    fn draws(content: &str) -> RecordingDevice {
         let mut data = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Contents 4 0 R \
 /Resources << /ExtGState << /A << /OP true >> /B << /OP true /op false >> \
-/C << /op true >> /D << /OPM 1 >> /E << /OP false >> >> \
-/XObject << /Im 5 0 R >> >> >>\nendobj\n"
+/C << /op true >> /D << /OPM 1 >> /E << /OP false >> /Photo << /RI /Perceptual >> /BadIntent << /RI 42 >> >> \
+/XObject << /Im 5 0 R /Proof 6 0 R >> >> >>\nendobj\n"
             .to_vec();
         data.extend(
             format!(
@@ -486,6 +494,7 @@ mod tests {
             b"5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream\nendobj\n",
         );
+        data.extend(b"6 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /Intent /AbsoluteColorimetric /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream\nendobj\n");
         data.extend(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
 
         let pdf = Pdf::new(data).unwrap();
@@ -497,10 +506,41 @@ mod tests {
             pdf.xref(),
             InterpreterSettings::default(),
         );
-        let mut device = OverprintDevice::default();
+        let mut device = RecordingDevice::default();
         interpret_page(&pdf.pages()[0], &mut context, &mut device);
 
-        device.0
+        device
+    }
+
+    fn overprints(content: &str) -> Vec<(&'static str, Overprint)> {
+        draws(content).overprints
+    }
+
+    #[test]
+    fn inline_image_intent_applies_to_its_own_draw() {
+        use RenderingIntent::{Perceptual, Saturation};
+
+        let content = "/Perceptual ri BI /W 1 /H 1 /BPC 8 /CS /G /Intent /Saturation ID A EI /BadIntent gs 0 0 2 2 re f";
+        assert_eq!(draws(content).intents, [Saturation, Perceptual]);
+    }
+
+    #[test]
+    fn rendering_intent_reaches_each_paint_and_restores_with_graphics_state() {
+        use RenderingIntent::{AbsoluteColorimetric, Perceptual, RelativeColorimetric, Saturation};
+
+        let content = "0 0 2 2 re f /Saturation ri q /Photo gs 0 0 2 2 re S /Im Do /Proof Do 0 0 2 2 re f Q /Im Do /Unrecognized ri /Im Do";
+        assert_eq!(
+            draws(content).intents,
+            [
+                RelativeColorimetric,
+                Perceptual,
+                Perceptual,
+                AbsoluteColorimetric,
+                Perceptual,
+                Saturation,
+                RelativeColorimetric
+            ]
+        );
     }
 
     const fn overprint(stroke: bool, fill: bool, mode: u8) -> Overprint {

@@ -334,7 +334,13 @@ impl<'a> Device<'a> for SvgRenderer<'a> {
                                 s.scale_factors.0 as f64,
                                 s.scale_factors.1 as f64,
                             );
-                            Self::draw_stencil_image(r, s, transform, paint);
+                            Self::draw_stencil_image(
+                                r,
+                                s,
+                                transform,
+                                paint,
+                                props.rendering_intent,
+                            );
                         },
                         None,
                     );

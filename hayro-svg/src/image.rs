@@ -96,6 +96,7 @@ impl<'a> SvgRenderer<'a> {
         stencil: LumaData,
         transform: Affine,
         paint: &Paint<'a>,
+        rendering_intent: hayro_interpret::RenderingIntent,
     ) {
         let interpolate = stencil.interpolate;
 
@@ -140,6 +141,7 @@ impl<'a> SvgRenderer<'a> {
                         soft_mask: None,
                         blend_mode: BlendMode::Normal,
                         overprint: Overprint::default(),
+                        rendering_intent,
                     },
                     &DrawMode::Fill(FillRule::NonZero),
                 );

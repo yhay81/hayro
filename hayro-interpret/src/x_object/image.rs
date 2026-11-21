@@ -191,6 +191,13 @@ impl<'a> ImageXObject<'a> {
                 soft_mask: None,
                 blend_mode: BlendMode::default(),
                 overprint: context.compositing().overprint,
+                rendering_intent: self
+                    .stream
+                    .dict()
+                    .get::<Name<'_>>(INTENT)
+                    .as_ref()
+                    .map(crate::RenderingIntent::from_name)
+                    .unwrap_or(context.compositing().rendering_intent),
             },
         );
         device.pop_transparency_group();
