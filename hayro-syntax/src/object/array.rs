@@ -196,6 +196,13 @@ impl<'a> FlexArrayIter<'a> {
         }
     }
 
+    /// Return one array item as source bytes without resolving an indirect reference.
+    pub fn next_raw(&mut self) -> Option<&'a [u8]> {
+        self.reader.skip_white_spaces_and_comments();
+        self.reader
+            .skip::<MaybeRef<Object<'_>>>(self.ctx.in_content_stream())
+    }
+
     #[allow(
         private_bounds,
         reason = "users shouldn't be able to implement `ObjectLike` for custom objects."

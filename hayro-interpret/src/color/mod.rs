@@ -5,6 +5,7 @@ mod cal_rgb;
 mod device_cmyk;
 mod device_gray;
 mod device_n;
+mod device_n_attributes;
 mod device_rgb;
 mod icc;
 mod indexed;
@@ -25,6 +26,7 @@ use self::pattern::Pattern;
 use self::separation::Separation;
 
 pub use self::device_n::DeviceNProcess;
+pub use self::device_n_attributes::{DeviceNAttributes, DeviceNMixingHints};
 use crate::cache::{Cache, CacheKey};
 use crate::function::Function;
 use hayro_syntax::object::Dict;
@@ -821,10 +823,11 @@ fn encode_components(input: &[f32], ranges: &[(f32, f32)]) -> SmallVec<[u8; 4]> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ColorSpace, ColorSpaceKind, MAX_COLOR_SPACE_DEPTH};
+    use super::{ColorSpace, ColorSpaceKind, DeviceNAttributes, MAX_COLOR_SPACE_DEPTH};
     use crate::cache::Cache;
+    use crate::function::Function;
     use hayro_syntax::Pdf;
-    use hayro_syntax::object::{Object, ObjectIdentifier};
+    use hayro_syntax::object::{Name, Object, ObjectIdentifier};
 
     fn indexed_chain(len: usize) -> Pdf {
         let mut data = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
@@ -1110,6 +1113,80 @@ stream\n{ 0 exch 0 exch 0 }\nendstream",
 
         assert_eq!(names, &[Box::from(&b"Spot"[..])]);
         assert!(process.is_none());
+    }
+
+    #[test]
+    fn read_device_n_ink_metadata_without_evaluating_the_tint_transform() {
+        let pdf = pdf_with(&[
+            b"[/DeviceN [/Cyan /Spot#20Gold] /DeviceRGB 11 0 R 12 0 R]",
+            b"<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Length 37 >>\nstream\n{ 1 exch sub exch 1 exch sub exch 1 }\nendstream",
+            b"<< /Colorants << /Spot#20Gold [/Separation /Spot#20Gold /DeviceGray 13 0 R] >> /MixingHints << /PrintingOrder [/Cyan /Unused /Spot#20Gold] /Solidities << /Default .25 /Spot#20Gold 1 /Unused 0 /Malformed 2 >> /DotGain << /Default 13 0 R /Spot#20Gold 14 0 R >> >> >>",
+            b"<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>",
+            b"<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >>",
+        ]);
+        let object = pdf
+            .xref()
+            .get::<Object<'_>>(ObjectIdentifier::new(10, 0))
+            .unwrap();
+        let attributes = DeviceNAttributes::from_object(&object).unwrap();
+        let hints = attributes.mixing_hints().unwrap();
+        let order = hints.printing_order().unwrap();
+        assert_eq!(
+            order
+                .iter::<Name<'_>>()
+                .map(|n| n.as_ref().to_vec())
+                .collect::<Vec<_>>(),
+            [b"Cyan".as_slice(), b"Unused", b"Spot Gold"]
+        );
+        assert_eq!(hints.solidity(b"Spot Gold"), Some(1.));
+        assert_eq!(hints.solidity(b"Unused"), Some(0.));
+        assert_eq!(hints.solidity(b"Cyan"), Some(0.25));
+        assert_eq!(hints.solidity(b"Malformed"), None);
+        let tint = |ink: &[u8]| {
+            let mut value = [0.];
+            Function::new(&hints.dot_gain(ink).unwrap())
+                .unwrap()
+                .eval(&[0.5], &mut value)
+                .unwrap();
+            value[0]
+        };
+        assert_eq!(tint(b"Spot Gold"), 0.25);
+        assert_eq!(tint(b"Cyan"), 0.5);
+        let separation =
+            ColorSpace::from_object(Object::Array(attributes.colorant(b"Spot Gold").unwrap()))
+                .unwrap();
+        assert!(matches!(
+            separation.kind(),
+            ColorSpaceKind::Separation {
+                name: b"Spot Gold",
+                ..
+            }
+        ));
+        assert!(attributes.colorant(b"Unused").is_none());
+        let renderer = ColorSpace::from_object(object).unwrap();
+        assert_eq!(
+            renderer.to_rgba(&[0.25, 0.75], 1.).to_rgba8(),
+            [191, 64, 255, 255]
+        );
+    }
+
+    #[test]
+    fn optional_ink_hints_do_not_manufacture_a_print_order_or_function() {
+        let pdf = pdf_with(&[
+            b"[/DeviceN [/A] /DeviceGray 900 0 R << /MixingHints << >> >>]",
+            b"<< /FunctionType 2 /Domain [0 1] /N 1 >>",
+        ]);
+        let source = pdf
+            .xref()
+            .get::<Object<'_>>(ObjectIdentifier::new(10, 0))
+            .unwrap();
+        let hints = DeviceNAttributes::from_object(&source)
+            .unwrap()
+            .mixing_hints()
+            .unwrap();
+        assert!(hints.printing_order().is_none());
+        assert!(hints.dot_gain(b"A").is_none());
+        assert_eq!(hints.solidity(b"A"), Some(0.));
     }
 
     #[test]
